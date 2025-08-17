@@ -537,10 +537,6 @@ def main():
     client = get_qdrant()
     ensure_collections(client)
 
-    if do_sync:
-        with st.spinner("Indexing restaurants into Qdrant..."):
-            ensure_qdrant_synced_from_sqlite(conn, client, embedder)
-        st.success("Synced.")
 
     # Session state
     if "user_id" not in st.session_state:
