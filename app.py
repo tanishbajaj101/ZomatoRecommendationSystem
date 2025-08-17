@@ -15,7 +15,7 @@ from qdrant_client.http import models as qmodels
 
 # ====== CONFIG ======
 DB_PATH = "restaurants.db"   # your SQLite file
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # None if not set
 RESTAURANT_COLLECTION = "restaurants"
 USER_PROFILE_COLLECTION = "user_profiles"
