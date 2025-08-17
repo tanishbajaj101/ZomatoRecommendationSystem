@@ -4,3 +4,4 @@ sentence-transformers>=2.6
 numpy>=1.24
 folium>=0.15
 streamlit-folium>=0.18
+streamlit_js_eval

@@ -9,6 +9,7 @@ import numpy as np
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+from streamlit_js_eval import get_geolocation
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -552,6 +553,10 @@ def main():
         st.session_state["has_feedback"] = hf
         st.session_state["weights"] = normalize_weights(w)
         st.session_state["interactions"] = inter
+    if "geo_auto_done" not in st.session_state:
+        st.session_state["geo_auto_done"] = False  # ensure we auto-ask only once
+    if "pending_loc" not in st.session_state:
+        st.session_state["pending_loc"] = None  
 
     # Maintain a hidden set (liked or disliked should not reappear)
     if "hidden_ids" not in st.session_state:
@@ -563,24 +568,66 @@ def main():
         st.session_state["lat"], st.session_state["lon"] = DEFAULT_LAT, DEFAULT_LON
     if "show_map" not in st.session_state:
         st.session_state["show_map"] = False
-    if "pending_loc" not in st.session_state:
-        st.session_state["pending_loc"] = None
+    if not st.session_state["geo_auto_done"]:
+        loc = get_geolocation()  # prompts on HTTPS or localhost
+        lat = lon = None
+        if isinstance(loc, dict):
+            coords = loc.get("coords") or loc
+            lat = coords.get("latitude")
+            lon = coords.get("longitude")
+
+        if lat is not None and lon is not None:
+            st.session_state["lat"] = float(lat)
+            st.session_state["lon"] = float(lon)
+            st.session_state["geo_auto_done"] = True
+            st.session_state["show_map"] = False
+            st.rerun()  # ensure recommendations re-run with new coords
+        else:
+            if "lat" not in st.session_state or "lon" not in st.session_state:
+                st.session_state["lat"], st.session_state["lon"] = DEFAULT_LAT, DEFAULT_LON
+            st.session_state["geo_auto_done"] = True 
 
     # Location UI
-    st.markdown("#### 📍 Selected Location")
-    col_a, col_b = st.columns([3, 1])
+    st.markdown("#### 📍 Current Location")
+
+    col_a, col_b, col_c = st.columns([3, 1, 1])
     with col_a:
-        st.info(f"Showing results about {RADIUS_KM}km near you")
+        st.info(
+            f"Latitude: **{st.session_state['lat']:.6f}**, "
+            f"Longitude: **{st.session_state['lon']:.6f}** (radius {RADIUS_KM} km)"
+        )
     with col_b:
-        if st.button("Change location on map"):
+        if st.button("Use device location"):
+            # Try again on demand
+            loc2 = get_geolocation()
+            la = lo = None
+            if isinstance(loc2, dict):
+                coords2 = loc2.get("coords") or loc2
+                la = coords2.get("latitude")
+                lo = coords2.get("longitude")
+            if la is not None and lo is not None:
+                st.session_state["lat"], st.session_state["lon"] = float(la), float(lo)
+                st.session_state["show_map"] = False
+                st.success("Device location applied.")
+                st.rerun()
+            else:
+                st.warning("Location unavailable. Allow the browser prompt and try again (HTTPS or localhost).")
+
+    with col_c:
+        if st.button("Change on map"):
             st.session_state["show_map"] = True
 
+    # ---- Map override flow (unchanged logic, improved reliability) ----
     if st.session_state["show_map"]:
+        import folium
+        from streamlit_folium import st_folium
+
         m = folium.Map(location=[st.session_state["lat"], st.session_state["lon"]], zoom_start=13)
         folium.Marker([st.session_state["lat"], st.session_state["lon"]], tooltip="Current").add_to(m)
         folium.Circle([st.session_state["lat"], st.session_state["lon"]], radius=RADIUS_KM*1000, fill=False).add_to(m)
         folium.LatLngPopup().add_to(m)
 
+        # IMPORTANT: request last_clicked from streamlit-folium
         out = st_folium(m, height=420, key="map", returned_objects=["last_clicked"])
 
         if out and out.get("last_clicked") is not None:
@@ -597,9 +644,9 @@ def main():
                     st.session_state["lat"], st.session_state["lon"] = la, lo
                     st.session_state["pending_loc"] = None
                     st.session_state["show_map"] = False
-                    st.rerun()
+                    st.rerun()  # refresh recommendations
             with c2:
-                if st.button("Reset", key="reset_loc"):
+                if st.button("Reset selection", key="reset_loc"):
                     st.session_state["pending_loc"] = None
                     st.rerun()
             with c3:
@@ -611,6 +658,7 @@ def main():
             if st.button("Cancel", key="cancel_map_nopick"):
                 st.session_state["show_map"] = False
                 st.rerun()
+
 
     st.divider()
 
