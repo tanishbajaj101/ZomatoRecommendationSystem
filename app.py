@@ -10,7 +10,7 @@ import numpy as np
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-from streamlit_js_eval import get_geolocation
+from streamlit_geolocation import st_geolocation  # <-- use this component
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -604,27 +604,8 @@ def main():
         st.session_state["show_map"] = False
     if "pending_loc" not in st.session_state:
         st.session_state["pending_loc"] = None
-    if "geo_tried" not in st.session_state:
-        st.session_state["geo_tried"] = False  # attempt once automatically
-    if "geo_auto_done" not in st.session_state:
-        st.session_state["geo_auto_done"] = False  # mark success when we actually get coords
-
-    # ===== Device Geolocation (attempt once automatically; success marks done) =====
-    if not st.session_state["geo_tried"]:
-        st.session_state["geo_tried"] = True
-        loc = get_geolocation()  # prompts on HTTPS or localhost
-        lat = lon = None
-        if isinstance(loc, dict):
-            coords = loc.get("coords") or loc
-            lat = coords.get("latitude")
-            lon = coords.get("longitude")
-
-        if lat is not None and lon is not None:
-            st.session_state["lat"] = float(lat)
-            st.session_state["lon"] = float(lon)
-            st.session_state["geo_auto_done"] = True
-            st.session_state["show_map"] = False
-            st.rerun()  # ensure recommendations re-run with new coords
+    if "geo_capture" not in st.session_state:
+        st.session_state["geo_capture"] = False  # toggles the st_geolocation component
 
     # Location UI
     st.markdown("#### 📍 Current Location")
@@ -635,24 +616,38 @@ def main():
             f"Longitude: **{st.session_state['lon']:.6f}** (radius {RADIUS_KM} km)"
         )
     with col_b:
+        # When clicked, we render the st_geolocation component below
         if st.button("Use device location"):
-            loc2 = get_geolocation()
-            la = lo = None
-            if isinstance(loc2, dict):
-                coords2 = loc2.get("coords") or loc2
-                la = coords2.get("latitude")
-                lo = coords2.get("longitude")
-            if la is not None and lo is not None:
-                st.session_state["lat"], st.session_state["lon"] = float(la), float(lo)
-                st.session_state["show_map"] = False
-                st.success("Device location applied.")
-                st.rerun()
-            else:
-                st.warning("Location unavailable. Allow the browser prompt and try again (Streamlit Cloud is HTTPS).")
+            st.session_state["geo_capture"] = True
 
     with col_c:
         if st.button("Change on map"):
             st.session_state["show_map"] = True
+
+    # Render the device geolocation component on-demand
+    if st.session_state["geo_capture"]:
+        st.info("Click **Allow** in your browser to share your location.")
+        loc = st_geolocation()  # shows a small map + triggers HTML5 geolocation
+        # Possible return shapes (depending on version): {'latitude','longitude'} or {'lat','lng'}
+        la = lo = None
+        if isinstance(loc, dict):
+            la = loc.get("latitude", loc.get("lat"))
+            lo = loc.get("longitude", loc.get("lng"))
+        col_g1, col_g2 = st.columns([1, 1])
+        with col_g1:
+            if st.button("Apply device location"):
+                if la is not None and lo is not None:
+                    st.session_state["lat"], st.session_state["lon"] = float(la), float(lo)
+                    st.session_state["show_map"] = False
+                    st.session_state["geo_capture"] = False
+                    st.success("Device location applied.")
+                    st.rerun()
+                else:
+                    st.warning("Location unavailable yet. Please allow the browser prompt or try again.")
+        with col_g2:
+            if st.button("Cancel device location"):
+                st.session_state["geo_capture"] = False
+                st.rerun()
 
     # ---- Map override flow ----
     if st.session_state["show_map"]:
@@ -748,7 +743,7 @@ def main():
             render_interaction_list(conn, st.session_state["interactions"].get("liked", []), "No liked restaurants yet.")
         with tabs[1]:
             render_interaction_list(conn, st.session_state["interactions"].get("disliked", []), "No disliked restaurants yet.")
-        c1, c2 = st.columns(2)
+        c1, _ = st.columns(2)
         with c1:
             if st.button("Clear all interactions"):
                 clear_all_interactions(client, st.session_state["user_id"])
