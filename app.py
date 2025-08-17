@@ -15,13 +15,14 @@ from qdrant_client.http import models as qmodels
 
 # ====== CONFIG ======
 DB_PATH = "restaurants.db"   # your SQLite file
-QDRANT_URL = os.getenv("QDRANT_URL")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # None if not set
+QDRANT_URL = st.secrets["QDRANT_URL"]
+QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
 RESTAURANT_COLLECTION = "restaurants"
 USER_PROFILE_COLLECTION = "user_profiles"
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # 384 dims
 
-# Weights for final score
+
+MODEL_LOCAL_DIR = os.getenv("MODEL_LOCAL_DIR", "./models/all-MiniLM-L6-v2")  
+
 DEFAULT_WEIGHTS = {"cuisine": 0.35, "ambience": 0.25, "rating": 0.20, "price": 0.20}
 def normalize_weights(w):
     import numpy as np
@@ -49,8 +50,13 @@ def user_point_id(user_id: str) -> str:
 # ====== LAZY IMPORT FOR EMBEDDINGS ======
 @st.cache_resource(show_spinner=False)
 def get_embedder():
+    import os
     from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(EMBEDDING_MODEL_NAME)
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    return SentenceTransformer(MODEL_LOCAL_DIR)
+
 
 # ====== QDRANT CLIENT + COLLECTIONS ======
 @st.cache_resource(show_spinner=False)
