@@ -3,7 +3,8 @@ import ast
 import json
 import math
 import sqlite3
-from typing import List, Dict, Any, Tuple, Set
+import uuid
+from typing import List, Dict, Tuple, Set
 
 import numpy as np
 import streamlit as st
@@ -21,38 +22,44 @@ QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
 RESTAURANT_COLLECTION = "restaurants"
 USER_PROFILE_COLLECTION = "user_profiles"
 
-
-MODEL_LOCAL_DIR = os.getenv("MODEL_LOCAL_DIR", "./models/all-MiniLM-L6-v2")  
+# SentenceTransformer model directory (uploaded to Streamlit Cloud storage or mounted)
+MODEL_LOCAL_DIR = os.getenv("MODEL_LOCAL_DIR", "./models/all-MiniLM-L6-v2")
 
 DEFAULT_WEIGHTS = {"cuisine": 0.35, "ambience": 0.25, "rating": 0.20, "price": 0.20}
-def normalize_weights(w):
-    import numpy as np
-    a = np.array([w.get("cuisine", 0.0), w.get("ambience", 0.0), w.get("rating", 0.0), w.get("price", 0.0)], dtype=float)
+DEFAULT_PRICE_PREF = np.array([0.25, 0.25, 0.25, 0.25], dtype=float)  # [0..3], sum=1
+DEFAULT_USER_TEXT_CUISINE = "popular dishes, Indian, Chinese, Continental, comfort food"
+DEFAULT_USER_TEXT_AMBIENCE = "cozy, clean, family friendly, natural ambience"
+
+# Default fallback location (Delhi CP area) if geolocation is unavailable
+DEFAULT_LAT, DEFAULT_LON = 28.6315, 77.2167
+RADIUS_KM = 10.0
+TOP_K = 8
+
+
+def normalize_weights(w: Dict[str, float]) -> Dict[str, float]:
+    a = np.array([
+        w.get("cuisine", 0.0),
+        w.get("ambience", 0.0),
+        w.get("rating", 0.0),
+        w.get("price", 0.0),
+    ], dtype=float)
     s = float(a.sum())
     if s <= 0:
         return DEFAULT_WEIGHTS.copy()
     a = a / s
     return {"cuisine": float(a[0]), "ambience": float(a[1]), "rating": float(a[2]), "price": float(a[3])}
 
-DEFAULT_PRICE_PREF = np.array([0.25, 0.25, 0.25, 0.25], dtype=float)  # [0..3], sum=1
-DEFAULT_USER_TEXT_CUISINE = "popular dishes, Indian, Chinese, Continental, comfort food"
-DEFAULT_USER_TEXT_AMBIENCE = "cozy, clean, family friendly, natural ambience"
-
-# Hardcoded default current location (Delhi CP area)
-DEFAULT_LAT, DEFAULT_LON = 28.6315, 77.2167
-RADIUS_KM = 10.0
-TOP_K = 8
-import uuid
 
 def user_point_id(user_id: str) -> str:
     # deterministic UUIDv5 from your logical user id
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user/{user_id}"))
 
+
 # ====== LAZY IMPORT FOR EMBEDDINGS ======
 @st.cache_resource(show_spinner=False)
 def get_embedder():
-    import os
     from sentence_transformers import SentenceTransformer
+    # Streamlit Cloud friendly: operate offline if model is already present
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -64,15 +71,13 @@ def get_embedder():
 def get_qdrant():
     return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
 
 def ensure_collections(client: QdrantClient, dim: int = 384):
     # restaurants collection (two named dense vectors)
     if not client.collection_exists(collection_name=RESTAURANT_COLLECTION):
         client.create_collection(
             collection_name=RESTAURANT_COLLECTION,
-            vectors_config={  # ← use a plain dict, not VectorParamsMap
+            vectors_config={  # version-agnostic: dict or VectorsConfig is OK
                 "cuisine": qmodels.VectorParams(size=dim, distance=qmodels.Distance.COSINE),
                 "ambience": qmodels.VectorParams(size=dim, distance=qmodels.Distance.COSINE),
             },
@@ -107,17 +112,20 @@ def get_conn(db_path: str):
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def fetch_rows_by_ids(conn, ids: List[int]) -> List[sqlite3.Row]:
     if not ids:
         return []
     q = f"SELECT * FROM restaurants WHERE idx IN ({','.join('?' for _ in ids)})"
     return conn.execute(q, ids).fetchall()
 
+
 # ====== VECTORIZATION / UPSERT ======
 def combine_cuisine_food(cuisine: str, food_items: str) -> str:
     c = cuisine or ""
     f = food_items or ""
     return f"Cuisines: {c}. Signature items: {f}."
+
 
 def vectorize_restaurant(embedder, cuisine: str, food_items: str, ambience: str) -> Tuple[np.ndarray, np.ndarray]:
     text_c = combine_cuisine_food(cuisine, food_items)
@@ -126,8 +134,11 @@ def vectorize_restaurant(embedder, cuisine: str, food_items: str, ambience: str)
     v_a = embedder.encode(text_a, normalize_embeddings=True)
     return v_c.astype(np.float32), v_a.astype(np.float32)
 
+
 def ensure_qdrant_synced_from_sqlite(conn, client, embedder, limit: int = None):
-    rows = conn.execute("SELECT idx, Cuisine, Food_Items, Ambience, Latitude, Longitude, Bayesian_Rating, Price_Category FROM restaurants").fetchall()
+    rows = conn.execute(
+        "SELECT idx, Cuisine, Food_Items, Ambience, Latitude, Longitude, Bayesian_Rating, Price_Category FROM restaurants"
+    ).fetchall()
     if limit is not None:
         rows = rows[:limit]
     points = []
@@ -157,13 +168,16 @@ def ensure_qdrant_synced_from_sqlite(conn, client, embedder, limit: int = None):
     if points:
         client.upsert(RESTAURANT_COLLECTION, points=points)
 
+
 # ====== USER PROFILE VECTORS & INTERACTIONS ======
 def normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
     return v if n == 0 else v / n
 
+
 def _empty_interactions() -> Dict[str, List[int]]:
     return {"liked": [], "disliked": []}
+
 
 def get_or_bootstrap_user_profile(embedder, client: QdrantClient, user_id: str):
     pid = user_point_id(user_id)
@@ -178,7 +192,6 @@ def get_or_bootstrap_user_profile(embedder, client: QdrantClient, user_id: str):
             w = pl.get("score_weights", DEFAULT_WEIGHTS.copy())
             w = normalize_weights(w)
             inter = pl.get("interactions", _empty_interactions())
-            # Ensure ints
             inter = {
                 "liked": [int(x) for x in inter.get("liked", [])],
                 "disliked": [int(x) for x in inter.get("disliked", [])],
@@ -209,6 +222,7 @@ def get_or_bootstrap_user_profile(embedder, client: QdrantClient, user_id: str):
     )
     return {"cuisine": v_c, "ambience": v_a}, price_pref, False, weights, interactions
 
+
 def update_user_profile(client: QdrantClient, user_id: str,
                         user_vecs: Dict[str, np.ndarray],
                         price_pref: np.ndarray,
@@ -234,9 +248,9 @@ def update_user_profile(client: QdrantClient, user_id: str,
         )],
     )
 
+
 def record_interaction(client: QdrantClient, user_id: str, rest_id: int, liked: bool):
     inter = st.session_state.get("interactions", _empty_interactions())
-    # Avoid duplicates & ensure mutual exclusivity
     if liked:
         if rest_id not in inter["liked"]:
             inter["liked"].append(rest_id)
@@ -248,11 +262,9 @@ def record_interaction(client: QdrantClient, user_id: str, rest_id: int, liked: 
         if rest_id in inter["liked"]:
             inter["liked"].remove(rest_id)
     st.session_state["interactions"] = inter
-    # Maintain hidden set
     hidden = st.session_state.get("hidden_ids", set())
     hidden.add(int(rest_id))
     st.session_state["hidden_ids"] = hidden
-    # Persist
     update_user_profile(
         client,
         st.session_state["user_id"],
@@ -262,6 +274,7 @@ def record_interaction(client: QdrantClient, user_id: str, rest_id: int, liked: 
         st.session_state.get("weights", DEFAULT_WEIGHTS.copy()),
         interactions=inter,
     )
+
 
 def remove_interaction(client: QdrantClient, user_id: str, rest_id: int):
     inter = st.session_state.get("interactions", _empty_interactions())
@@ -289,6 +302,7 @@ def remove_interaction(client: QdrantClient, user_id: str, rest_id: int):
             interactions=inter,
         )
 
+
 def clear_all_interactions(client: QdrantClient, user_id: str):
     st.session_state["interactions"] = _empty_interactions()
     st.session_state["hidden_ids"] = set()
@@ -302,6 +316,7 @@ def clear_all_interactions(client: QdrantClient, user_id: str):
         interactions=st.session_state["interactions"],
     )
 
+
 # ====== RECOMMENDATION (with Qdrant GEO filter) ======
 def recommend(client: QdrantClient,
               embedder,
@@ -312,7 +327,6 @@ def recommend(client: QdrantClient,
               weights: Dict[str, float],
               top_k: int = TOP_K,
               excluded_ids: Set[int] = None):
-    # Build geo filter (radius in meters)
     geo_filter = qmodels.Filter(
         must=[
             qmodels.FieldCondition(
@@ -325,7 +339,6 @@ def recommend(client: QdrantClient,
         ]
     )
 
-    # Grab more than we need to survive filtering
     limit = max(200, top_k * 10)
 
     srch = [
@@ -349,7 +362,6 @@ def recommend(client: QdrantClient,
     if not ids:
         return []
 
-    # Fetch rows and rank
     rows = fetch_rows_by_ids(conn, ids)
 
     ex = excluded_ids or set()
@@ -374,6 +386,19 @@ def recommend(client: QdrantClient,
     ranked.sort(key=lambda x: x[0], reverse=True)
     return [r for _, r in ranked[:top_k]]
 
+
+# ====== DISPLAY-ONLY GEO UTILS ======
+def haversine_km(lat1, lon1, lat2, lon2) -> float:
+    """Great-circle distance in kilometers between two WGS84 points."""
+    R = 6371.0088
+    phi1, phi2 = math.radians(float(lat1)), math.radians(float(lat2))
+    dphi = math.radians(float(lat2) - float(lat1))
+    dlmb = math.radians(float(lon2) - float(lon1))
+    a = (math.sin(dphi / 2) ** 2
+         + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2)
+    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+
+
 # ====== IMAGE CAROUSEL ======
 def parse_images_field(images_value) -> List[str]:
     if images_value is None:
@@ -395,6 +420,7 @@ def parse_images_field(images_value) -> List[str]:
         pass
     return [s]  # fallback single
 
+
 def image_carousel(urls: List[str], key: str):
     if key not in st.session_state:
         st.session_state[key] = 0
@@ -415,6 +441,7 @@ def image_carousel(urls: List[str], key: str):
     with c3:
         st.caption(f"{i+1} / {len(urls)}")
 
+
 # ====== LIKE / DISLIKE ======
 def apply_feedback(embedder, client, user_id: str, row: sqlite3.Row, liked: bool,
                    user_vecs: Dict[str, np.ndarray], price_pref: np.ndarray, has_feedback: bool):
@@ -426,33 +453,27 @@ def apply_feedback(embedder, client, user_id: str, row: sqlite3.Row, liked: bool
         if liked:
             user_vecs["cuisine"] = normalize(vc)
             user_vecs["ambience"] = normalize(va)
-            # price: make it strongly prefer this category
             pp = np.full(4, 0.05, dtype=float)
             pp[pc] = 0.85
             price_pref[:] = pp / pp.sum()
         else:
-            # disliked first: push away from this point strongly
             user_vecs["cuisine"] = normalize(user_vecs["cuisine"] - vc)
             user_vecs["ambience"] = normalize(user_vecs["ambience"] - va)
-            # price: de-emphasize this category
             pp = np.full(4, 0.25, dtype=float)
             pp[pc] = max(0.05, pp[pc] - 0.15)
             price_pref[:] = pp / pp.sum()
-
         has_feedback = True
     else:
-        # SUBSEQUENT INTERACTIONS: momentum update
         alpha = 0.20 if liked else -0.20
         user_vecs["cuisine"] = normalize(user_vecs["cuisine"]*(1 - abs(alpha)) + alpha*vc)
         user_vecs["ambience"] = normalize(user_vecs["ambience"]*(1 - abs(alpha)) + alpha*va)
-        # price update
         delta = 0.10 if liked else -0.08
         price_pref[pc] = max(0.01, price_pref[pc] + delta)
         s = price_pref.sum()
         if s > 0:
             price_pref[:] = price_pref / s
 
-    # Record & persist interaction, hide from future recommendations
+    # Record & persist interaction; hide from future recommendations
     record_interaction(client, user_id, int(row["idx"]), liked)
 
     # Persist vectors + flags as well (with weights)
@@ -461,15 +482,30 @@ def apply_feedback(embedder, client, user_id: str, row: sqlite3.Row, liked: bool
     return has_feedback
 
 
-# ====== UI RENDERING (STRICT FIELDS ONLY) ======
-def render_restaurant_card(row: sqlite3.Row):
+# ====== UI RENDERING (STRICT FIELDS ONLY + distance badge) ======
+def render_restaurant_card(row: sqlite3.Row, user_lat: float = None, user_lon: float = None):
     img_urls = parse_images_field(row["Images"])
+
+    dist_text = None
+    try:
+        if user_lat is not None and user_lon is not None and row["Latitude"] is not None and row["Longitude"] is not None:
+            d_km = haversine_km(user_lat, user_lon, float(row["Latitude"]), float(row["Longitude"]))
+            dist_text = f"{d_km:.1f} km"
+    except Exception:
+        dist_text = None
+
     with st.container(border=True):
         c_img, c_txt = st.columns([1.2, 2])
         with c_img:
             image_carousel(img_urls, key=f"carousel_{row['idx']}")
         with c_txt:
-            st.subheader(str(row["Restaurant_Name"]))
+            # Title + distance badge (you asked to show distance)
+            title = str(row["Restaurant_Name"])
+            if dist_text:
+                st.subheader(title + f"  ·  🧭 {dist_text}")
+            else:
+                st.subheader(title)
+
             st.markdown(f"**Cuisine:** {row['Cuisine']}")
             st.markdown(f"**Pricing for 2:** ₹{int(row['Pricing_for_2']) if row['Pricing_for_2'] is not None else '—'}")
             st.markdown(f"**Dining Rating:** {row['Dining_Rating']}")
@@ -480,20 +516,21 @@ def render_restaurant_card(row: sqlite3.Row):
             st.markdown(f"**Food Items:** {row['Food_Items']}")
             st.markdown(f"**Ambience:** {row['Ambience']}")
 
+
 def render_interaction_list(conn, ids: List[int], label_empty: str):
     ids = list(dict.fromkeys(int(x) for x in ids))  # de-dup, preserve order
     if not ids:
         st.caption(label_empty)
         return
     rows = fetch_rows_by_ids(conn, ids)
-    # maintain order as per ids
     order = {int(i): k for k, i in enumerate(ids)}
     rows.sort(key=lambda r: order.get(int(r["idx"]), 1e9))
     for r in rows:
         with st.container(border=True):
             c1, c2 = st.columns([2, 1])
             with c1:
-                st.markdown(f"**{r['Restaurant_Name']}**  \n_{r['Cuisine']}_ • ₹{int(r['Pricing_for_2']) if r['Pricing_for_2'] else '—'} • ⭐ {r['Dining_Rating']}")
+                price = f"₹{int(r['Pricing_for_2'])}" if r["Pricing_for_2"] else "—"
+                st.markdown(f"**{r['Restaurant_Name']}**  \n_{r['Cuisine']}_ • {price} • ⭐ {r['Dining_Rating']}")
                 st.caption(r["Address"])
             with c2:
                 if st.button("Unhide", key=f"unhide_{r['idx']}"):
@@ -501,18 +538,26 @@ def render_interaction_list(conn, ids: List[int], label_empty: str):
                     st.toast("Unhidden from history. It can appear in recommendations again.")
                     st.rerun()
 
+
 # ====== MAIN APP ======
 def main():
     st.set_page_config(page_title="Zomato Recommender", layout="wide")
     st.title("🍽️ Zomato Restaurant Recommender")
 
-    # Sidebar admin
-# Sidebar admin (collapsed by default)
+    conn = get_conn(DB_PATH)
+    embedder = get_embedder()
+    client = get_qdrant()
+    ensure_collections(client)
+
+    # Sidebar admin (collapsed by default)
     with st.sidebar:
         with st.expander("⚙️ Admin / Setup", expanded=False):
+            if st.button("Sync/Refresh Qdrant from SQLite"):
+                with st.spinner("Indexing restaurants into Qdrant..."):
+                    ensure_qdrant_synced_from_sqlite(conn, client, embedder)
+                st.success("Qdrant synced from SQLite.")
+
             if st.button("Reset profile (cold start)", key="reset_profile_btn"):
-                embedder = get_embedder()
-                client = get_qdrant()
                 v_c = embedder.encode(DEFAULT_USER_TEXT_CUISINE, normalize_embeddings=True).astype(np.float32)
                 v_a = embedder.encode(DEFAULT_USER_TEXT_AMBIENCE, normalize_embeddings=True).astype(np.float32)
                 st.session_state["user_vecs"] = {"cuisine": v_c, "ambience": v_a}
@@ -532,16 +577,10 @@ def main():
                 )
                 st.success("Profile reset to cold start.")
 
-
-    conn = get_conn(DB_PATH)
-    embedder = get_embedder()
-    client = get_qdrant()
-    ensure_collections(client)
-
-
     # Session state
     if "user_id" not in st.session_state:
         st.session_state["user_id"] = "user-001"
+
     if ("user_vecs" not in st.session_state or
         "price_pref" not in st.session_state or
         "has_feedback" not in st.session_state or
@@ -553,12 +592,7 @@ def main():
         st.session_state["has_feedback"] = hf
         st.session_state["weights"] = normalize_weights(w)
         st.session_state["interactions"] = inter
-    if "geo_auto_done" not in st.session_state:
-        st.session_state["geo_auto_done"] = False  # ensure we auto-ask only once
-    if "pending_loc" not in st.session_state:
-        st.session_state["pending_loc"] = None  
 
-    # Maintain a hidden set (liked or disliked should not reappear)
     if "hidden_ids" not in st.session_state:
         liked = st.session_state["interactions"].get("liked", [])
         disliked = st.session_state["interactions"].get("disliked", [])
@@ -568,7 +602,16 @@ def main():
         st.session_state["lat"], st.session_state["lon"] = DEFAULT_LAT, DEFAULT_LON
     if "show_map" not in st.session_state:
         st.session_state["show_map"] = False
-    if not st.session_state["geo_auto_done"]:
+    if "pending_loc" not in st.session_state:
+        st.session_state["pending_loc"] = None
+    if "geo_tried" not in st.session_state:
+        st.session_state["geo_tried"] = False  # attempt once automatically
+    if "geo_auto_done" not in st.session_state:
+        st.session_state["geo_auto_done"] = False  # mark success when we actually get coords
+
+    # ===== Device Geolocation (attempt once automatically; success marks done) =====
+    if not st.session_state["geo_tried"]:
+        st.session_state["geo_tried"] = True
         loc = get_geolocation()  # prompts on HTTPS or localhost
         lat = lon = None
         if isinstance(loc, dict):
@@ -582,14 +625,9 @@ def main():
             st.session_state["geo_auto_done"] = True
             st.session_state["show_map"] = False
             st.rerun()  # ensure recommendations re-run with new coords
-        else:
-            if "lat" not in st.session_state or "lon" not in st.session_state:
-                st.session_state["lat"], st.session_state["lon"] = DEFAULT_LAT, DEFAULT_LON
-            st.session_state["geo_auto_done"] = True 
 
     # Location UI
     st.markdown("#### 📍 Current Location")
-
     col_a, col_b, col_c = st.columns([3, 1, 1])
     with col_a:
         st.info(
@@ -598,7 +636,6 @@ def main():
         )
     with col_b:
         if st.button("Use device location"):
-            # Try again on demand
             loc2 = get_geolocation()
             la = lo = None
             if isinstance(loc2, dict):
@@ -611,23 +648,19 @@ def main():
                 st.success("Device location applied.")
                 st.rerun()
             else:
-                st.warning("Location unavailable. Allow the browser prompt and try again (HTTPS or localhost).")
+                st.warning("Location unavailable. Allow the browser prompt and try again (Streamlit Cloud is HTTPS).")
 
     with col_c:
         if st.button("Change on map"):
             st.session_state["show_map"] = True
 
-    # ---- Map override flow (unchanged logic, improved reliability) ----
+    # ---- Map override flow ----
     if st.session_state["show_map"]:
-        import folium
-        from streamlit_folium import st_folium
-
         m = folium.Map(location=[st.session_state["lat"], st.session_state["lon"]], zoom_start=13)
         folium.Marker([st.session_state["lat"], st.session_state["lon"]], tooltip="Current").add_to(m)
         folium.Circle([st.session_state["lat"], st.session_state["lon"]], radius=RADIUS_KM*1000, fill=False).add_to(m)
         folium.LatLngPopup().add_to(m)
 
-        # IMPORTANT: request last_clicked from streamlit-folium
         out = st_folium(m, height=420, key="map", returned_objects=["last_clicked"])
 
         if out and out.get("last_clicked") is not None:
@@ -644,7 +677,7 @@ def main():
                     st.session_state["lat"], st.session_state["lon"] = la, lo
                     st.session_state["pending_loc"] = None
                     st.session_state["show_map"] = False
-                    st.rerun()  # refresh recommendations
+                    st.rerun()
             with c2:
                 if st.button("Reset selection", key="reset_loc"):
                     st.session_state["pending_loc"] = None
@@ -659,50 +692,31 @@ def main():
                 st.session_state["show_map"] = False
                 st.rerun()
 
-
     st.divider()
 
     # Recommendations + Controls
     left, right = st.columns([2, 1])
     with right:
-# ---- Scoring Weights (robust, state-safe) ----
+        # ---- Scoring Weights (normalized & persisted) ----
         st.markdown("#### 🎛️ Scoring Weights")
 
-        # seed raw slider state exactly once, from current effective weights
         if "w_raw" not in st.session_state:
             st.session_state["w_raw"] = (st.session_state.get("weights", DEFAULT_WEIGHTS)).copy()
 
-        wc = st.slider(
-            "Cuisine similarity", 0.0, 1.0,
-            float(st.session_state["w_raw"]["cuisine"]), 0.01,
-            key="w_cuisine"
-        )
-        wa = st.slider(
-            "Ambience similarity", 0.0, 1.0,
-            float(st.session_state["w_raw"]["ambience"]), 0.01,
-            key="w_ambience"
-        )
-        wr = st.slider(
-            "Bayesian rating", 0.0, 1.0,
-            float(st.session_state["w_raw"]["rating"]), 0.01,
-            key="w_rating"
-        )
-        wp = st.slider(
-            "Price context", 0.0, 1.0,
-            float(st.session_state["w_raw"]["price"]), 0.01,
-            key="w_price"
-        )
+        wc = st.slider("Cuisine similarity", 0.0, 1.0, float(st.session_state["w_raw"]["cuisine"]), 0.01, key="w_cuisine")
+        wa = st.slider("Ambience similarity", 0.0, 1.0, float(st.session_state["w_raw"]["ambience"]), 0.01, key="w_ambience")
+        wr = st.slider("Bayesian rating",   0.0, 1.0, float(st.session_state["w_raw"]["rating"]), 0.01, key="w_rating")
+        wp = st.slider("Price context",     0.0, 1.0, float(st.session_state["w_raw"]["price"]),  0.01, key="w_price")
 
         raw_w = {"cuisine": wc, "ambience": wa, "rating": wr, "price": wp}
-        current_weights = normalize_weights(raw_w)              # always compute fresh
-        st.session_state["weights"] = current_weights           # single source of truth
+        current_weights = normalize_weights(raw_w)
+        st.session_state["weights"] = current_weights
         st.caption(
             f"Normalized: cuisine {current_weights['cuisine']:.2f} • "
             f"ambience {current_weights['ambience']:.2f} • "
             f"rating {current_weights['rating']:.2f} • "
             f"price {current_weights['price']:.2f}"
         )
-
 
         st.markdown("#### 💸 Price Preference (context)")
         p = st.session_state["price_pref"]
@@ -714,6 +728,7 @@ def main():
         if s == 0:
             s = 1.0
         st.session_state["price_pref"] = np.array([p0, p1, p2, p3]) / s
+
         if st.button("Save preference"):
             hf = st.session_state.get("has_feedback", False)
             update_user_profile(
@@ -722,11 +737,10 @@ def main():
                 st.session_state["user_vecs"],
                 st.session_state["price_pref"],
                 hf,
-                current_weights,                                 # <-- use fresh weights
+                current_weights,
                 st.session_state["interactions"]
             )
             st.success("Preferences (price + weights) saved.")
-
 
         st.markdown("#### ⭐ My Interactions")
         tabs = st.tabs(["❤️ Liked", "🚫 Disliked"])
@@ -749,17 +763,16 @@ def main():
                 (st.session_state["lat"], st.session_state["lon"]),
                 st.session_state["user_vecs"],
                 st.session_state["price_pref"],
-                st.session_state["weights"],      # always fresh now
+                st.session_state["weights"],
                 top_k=TOP_K,
                 excluded_ids=st.session_state.get("hidden_ids", set()),
             )
-
 
         if not rows:
             st.warning("No restaurants found after filtering. Try another location or clear interactions.")
         else:
             for r in rows:
-                render_restaurant_card(r)
+                render_restaurant_card(r, user_lat=st.session_state["lat"], user_lon=st.session_state["lon"])
                 b1, b2, _ = st.columns([1, 1, 8])
                 with b1:
                     if st.button("👍", key=f"like_{r['idx']}"):
@@ -777,7 +790,6 @@ def main():
                         st.session_state["has_feedback"] = hf
                         st.toast("Preference updated (disliked). Hidden from future recommendations.")
                         st.rerun()
-
 
 
 if __name__ == "__main__":
