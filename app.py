@@ -39,7 +39,7 @@ DEFAULT_USER_TEXT_AMBIENCE = "cozy, clean, family friendly, natural ambience"
 
 # Hardcoded default current location (Delhi CP area)
 DEFAULT_LAT, DEFAULT_LON = 28.6315, 77.2167
-RADIUS_KM = 15.0
+RADIUS_KM = 10.0
 TOP_K = 8
 import uuid
 
@@ -502,8 +502,8 @@ def render_interaction_list(conn, ids: List[int], label_empty: str):
 
 # ====== MAIN APP ======
 def main():
-    st.set_page_config(page_title="Restaurant Recommender", layout="wide")
-    st.title("🍽️ Agentic Restaurant Recommender")
+    st.set_page_config(page_title="Zomato Recommender", layout="wide")
+    st.title("🍽️ Zomato Restaurant Recommender")
 
     # Sidebar admin
 # Sidebar admin (collapsed by default)
@@ -567,10 +567,10 @@ def main():
         st.session_state["pending_loc"] = None
 
     # Location UI
-    st.markdown("#### 📍 Current Location")
+    st.markdown("#### 📍 Selected Location")
     col_a, col_b = st.columns([3, 1])
     with col_a:
-        st.info(f"Latitude: **{st.session_state['lat']:.6f}**, Longitude: **{st.session_state['lon']:.6f}**  (radius {RADIUS_KM} km)")
+        st.info(f"Showing results about {RADIUS_KM}km near you")
     with col_b:
         if st.button("Change location on map"):
             st.session_state["show_map"] = True
