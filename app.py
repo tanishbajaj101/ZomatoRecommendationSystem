@@ -10,7 +10,7 @@ import numpy as np
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-from streamlit_geolocation import st_geolocation  # <-- use this component
+from streamlit_geolocation import streamlit_geolocation  # ✅ correct import
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -605,7 +605,7 @@ def main():
     if "pending_loc" not in st.session_state:
         st.session_state["pending_loc"] = None
     if "geo_capture" not in st.session_state:
-        st.session_state["geo_capture"] = False  # toggles the st_geolocation component
+        st.session_state["geo_capture"] = False  # toggles the streamlit_geolocation component
 
     # Location UI
     st.markdown("#### 📍 Current Location")
@@ -616,7 +616,7 @@ def main():
             f"Longitude: **{st.session_state['lon']:.6f}** (radius {RADIUS_KM} km)"
         )
     with col_b:
-        # When clicked, we render the st_geolocation component below
+        # When clicked, render the geolocation component below
         if st.button("Use device location"):
             st.session_state["geo_capture"] = True
 
@@ -627,8 +627,8 @@ def main():
     # Render the device geolocation component on-demand
     if st.session_state["geo_capture"]:
         st.info("Click **Allow** in your browser to share your location.")
-        loc = st_geolocation()  # shows a small map + triggers HTML5 geolocation
-        # Possible return shapes (depending on version): {'latitude','longitude'} or {'lat','lng'}
+        loc = streamlit_geolocation()  # ✅ correct function name
+        # Typical return: {'latitude', 'longitude', 'altitude', 'accuracy', ...}
         la = lo = None
         if isinstance(loc, dict):
             la = loc.get("latitude", loc.get("lat"))
