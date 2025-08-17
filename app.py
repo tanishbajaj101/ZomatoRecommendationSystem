@@ -506,32 +506,31 @@ def main():
     st.title("🍽️ Agentic Restaurant Recommender")
 
     # Sidebar admin
+# Sidebar admin (collapsed by default)
     with st.sidebar:
-        st.markdown("### Admin / Setup")
-        st.caption("One-time sync vectors from SQLite to Qdrant if not already done.")
-        do_sync = st.button("Sync/Refresh Qdrant from SQLite")
+        with st.expander("⚙️ Admin / Setup", expanded=False):
+            if st.button("Reset profile (cold start)", key="reset_profile_btn"):
+                embedder = get_embedder()
+                client = get_qdrant()
+                v_c = embedder.encode(DEFAULT_USER_TEXT_CUISINE, normalize_embeddings=True).astype(np.float32)
+                v_a = embedder.encode(DEFAULT_USER_TEXT_AMBIENCE, normalize_embeddings=True).astype(np.float32)
+                st.session_state["user_vecs"] = {"cuisine": v_c, "ambience": v_a}
+                st.session_state["price_pref"] = DEFAULT_PRICE_PREF.copy()
+                st.session_state["has_feedback"] = False
+                st.session_state["weights"] = DEFAULT_WEIGHTS.copy()
+                st.session_state["interactions"] = {"liked": [], "disliked": []}
+                st.session_state["hidden_ids"] = set()
+                update_user_profile(
+                    client,
+                    st.session_state.get("user_id", "user-001"),
+                    st.session_state["user_vecs"],
+                    st.session_state["price_pref"],
+                    st.session_state["has_feedback"],
+                    st.session_state["weights"],
+                    st.session_state["interactions"],
+                )
+                st.success("Profile reset to cold start.")
 
-        # Optional: full reset
-        if st.button("Reset profile (cold start)"):
-            embedder = get_embedder()
-            client = get_qdrant()
-            # Recreate default vectors & wipe interactions
-            v_c = embedder.encode(DEFAULT_USER_TEXT_CUISINE, normalize_embeddings=True).astype(np.float32)
-            v_a = embedder.encode(DEFAULT_USER_TEXT_AMBIENCE, normalize_embeddings=True).astype(np.float32)
-            st.session_state["user_vecs"] = {"cuisine": v_c, "ambience": v_a}
-            st.session_state["price_pref"] = DEFAULT_PRICE_PREF.copy()
-            st.session_state["has_feedback"] = False
-            st.session_state["weights"] = DEFAULT_WEIGHTS.copy()
-            st.session_state["interactions"] = _empty_interactions()
-            st.session_state["hidden_ids"] = set()
-            update_user_profile(client,
-                                st.session_state.get("user_id", "user-001"),
-                                st.session_state["user_vecs"],
-                                st.session_state["price_pref"],
-                                st.session_state["has_feedback"],
-                                st.session_state["weights"],
-                                st.session_state["interactions"])
-            st.success("Profile reset to cold start.")
 
     conn = get_conn(DB_PATH)
     embedder = get_embedder()
@@ -719,7 +718,7 @@ def main():
                 render_restaurant_card(r)
                 b1, b2, _ = st.columns([1, 1, 8])
                 with b1:
-                    if st.button("👍 Like", key=f"like_{r['idx']}"):
+                    if st.button("👍", key=f"like_{r['idx']}"):
                         hf = apply_feedback(get_embedder(), client, st.session_state["user_id"], r, True,
                                             st.session_state["user_vecs"], st.session_state["price_pref"],
                                             st.session_state["has_feedback"])
@@ -727,7 +726,7 @@ def main():
                         st.toast("Preference updated (liked). Hidden from future recommendations.")
                         st.rerun()
                 with b2:
-                    if st.button("👎 Dislike", key=f"dislike_{r['idx']}"):
+                    if st.button("👎", key=f"dislike_{r['idx']}"):
                         hf = apply_feedback(get_embedder(), client, st.session_state["user_id"], r, False,
                                             st.session_state["user_vecs"], st.session_state["price_pref"],
                                             st.session_state["has_feedback"])
@@ -735,10 +734,7 @@ def main():
                         st.toast("Preference updated (disliked). Hidden from future recommendations.")
                         st.rerun()
 
-    with st.expander("Indexes & Data Health Checks"):
-        st.caption("- If results look off, click **Sync/Refresh Qdrant** (sidebar) to rebuild vectors from SQLite.")
-        st.caption("- Ensure `Bayesian_Rating` is on a 0–5 scale; ensure `Price_Category` ∈ {0,1,2,3}.")
-        st.caption("- `Images` must be JSON or Python list-like string of image URLs.")
+
 
 if __name__ == "__main__":
     main()
